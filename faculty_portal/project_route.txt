@@ -1,0 +1,95 @@
+Route
+------
+Intiator Approved_by forward_to
+0	0	1
+0	1	2
+1	1	3
+2	2	3
+
+
+HOD-> accept reject ask_for_clarification make_comment
+Dean-> accept reject ask_for_clarification make_comment
+
+home_base.html
+
+Home page
+--------
+name
+designation
+department
+email id
+
+
+base-> faculty	hod	dean	director
+
+template
+---------
+home_base
+apply_base	(form type)
+menu_base	(table type)
+content_base	(detail wala)
+hiring_base
+
+faculty
+-------
+home <- home_base
+apply <- apply_base
+history <- menu_base
+detail	<-content_base
+
+HoD
+----
+home	<- home_base
+apply	<- apply_base
+history	<- menu_base
+detail	<-content_base
+pending_application	<- menu_base
+apprroved_application	<- menu_base
+detail_pending_application	<-content_base
+detail_approval_application <-content_base
+
+Dean
+----
+home	<- home_base
+apply	<- apply_base
+history	<- menu_base
+detail	<-content_base
+pending_application	<- menu_base
+apprroval_application	<- menu_base
+detail_pending_application	<-content_base
+detail_approval_application	<-content_base
+hire faculty <- hiring_base
+
+Director
+------
+home	<- home_base
+pending_application	<- menu_base
+apprroval_application	<- menu_base
+detail_pending_application	<-content_base
+detail_approval_application	<-content_base
+appint hod	<- hiring_base
+appoint dean 	<- hiring_base
+
+procedure for getting all comment in increasing_order by commenting date->
+
+
+
+Detail
+-------
+status
+subject
+text
+start_date
+end_date
+applied_on
+comments (increasing order by commenting date)
+	each comment section:
+		date
+		commented by (perso name, designation)
+		comment text
+if in processing
+	comment box
+	button
+		comment
+		reject
+		approve

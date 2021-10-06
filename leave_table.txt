@@ -1,0 +1,77 @@
+-- table to store leave application
+-- leave_application table
+create table leave_application(
+	faculty_id int,
+	application_id SERIAL not null unique,
+	subject TEXT,
+	description TEXT,
+	start_date DATE,
+	end_date DATE,
+	applied_on TIMESTAMP default now(),
+	status varchar(10) default 'pending',
+	type varchar(1) default 'n',
+	PRIMARY KEY (faculty_id, application_id)
+)
+
+-- table to store comment
+create table comment(
+	application_id int,
+	comment_id SERIAL not null,
+	commented_on TIMESTAMP,
+	comment TEXT,
+	--faculty_id should be either in faculty table or in old_faculty table
+	faculty_id int not null,
+	designation varchar(10) default 'self',
+	PRIMARY KEY (application_id, comment_id),
+	FOREIGN KEY (application_id) REFERENCES leave_application(application_id)	
+)
+
+
+-- table to store route for normal leave application
+create table route(
+	initiator varchar not null,
+	approved_by varchar not null,
+	forward_to varchar not null,
+	PRIMARY KEY (initiator, approved_by)
+)
+
+-- table to store route for retrospective leave application
+create table route_r(
+	initiator varchar not null,
+	approved_by varchar not null,
+	forward_to varchar not null,
+	PRIMARY KEY (initiator, approved_by)
+)
+
+
+-- table to store leave application in process
+create table pending_leave_application(
+	faculty_id int,
+	application_id int,
+	prev_level varchar not null,
+	current_level varchar not null,
+	current_level_faculty_id int not null,
+	status varchar(10) default 'pending',
+	date TIMESTAMP default now(),
+	FOREIGN KEY (faculty_id) REFERENCES faculty(faculty_id),
+	FOREIGN KEY (application_id) REFERENCES leave_application(application_id),
+	PRIMARY KEY (faculty_id, application_id, prev_level)
+);
+
+-- table to store processed leave application
+-- Entry in this table will come from pending_leave_application
+-- which means faculty_id will always be valid
+create table leave_application_hist(
+	faculty_id int,
+	application_id int,
+	prev_level varchar not null,
+	current_level varchar not null,
+	current_level_faculty_id int not null,
+	status varchar(10) default 'pending',
+	remark text default ' ',
+	date TIMESTAMP,
+	FOREIGN KEY (application_id) REFERENCES leave_application(application_id),
+	PRIMARY KEY (faculty_id, application_id, prev_level)
+);
+
+drop table pending_leave_application;

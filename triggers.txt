@@ -1,0 +1,436 @@
+---------------------------------------------------------------------------
+--Trigger for verifying insertion in HoD table
+--Trigger on deletion/update from HoD
+---------------------------------------------------------------------------
+
+-- table to store data of retired HoD
+create table old_hod(
+	id SERIAL NOT NULL PRIMARY KEY,
+	faculty_id int not null,
+	dept_name varchar(6),
+	start_date DATE,
+	end_date DATE,
+	leaved_on TIMESTAMP(6),
+	FOREIGN KEY(dept_name) REFERENCES department(dept_name)
+)
+
+
+create or replace function verify_hod_fun()
+RETURNS TRIGGER
+language plpgsql
+as
+$$
+declare
+	faculty_data record;
+	
+	update_cur cursor for
+		select *
+		from pending_leave_application p;
+	row record;
+	
+	dummy record;
+begin
+		
+	-- if insertion ir update then check the department 
+	-- of faculty and HoD department
+	if TG_OP='INSERT' or TG_OP='UPDATE' then
+		select *
+		into faculty_data
+		from faculty f
+		where new.faculty_id = f.faculty_id;
+		
+		if not found then
+			raise exception 'faculty does not exist';
+		end if;
+		
+		select * into dummy from cross_cutting_faculty c where c.faculty_id=new.faculty_id;
+		if found then
+			raise exception 'Faculty already hold cross faculty role. Cannot be appointed as HoD';
+		end if;
+		
+		select * into dummy from director d where d.faculty_id=new.faculty_id;
+		if found then
+			raise exception 'Faculty already hold Director position. Cannot be appointed as HoD';
+		end if;
+		
+		if faculty_data.dept_name = new.dept_name then
+			raise info '% is now new HoD of department %', faculty_data.name, faculty_data.dept_name;
+		else
+			raise exception 'faculty department is different from appointing HoD deparment';
+		end if;
+		
+		call auto_reject_when_faculty_change(new.faculty_id);
+		
+		if TG_OP='UPDATE' then
+			insert into old_hod (faculty_id, dept_name, start_date, end_date, leaved_on)
+				values (old.faculty_id, old.dept_name, old.start_date, old.end_date, now());
+				
+			open update_cur;
+				
+			loop
+				fetch update_cur into row;
+				exit when not found;
+				
+				if row.current_level='hod' then
+					update pending_leave_application set current_level_faculty_id = new.faculty_id
+						where status='pending' and current_level = row.current_level;
+				end if;
+			end loop;
+			
+			call auto_reject_when_faculty_change(old.faculty_id);
+			
+			close update_cur;
+		end if;
+		
+		return new;
+	end if;
+	
+	-- if delete or update
+	-- then store this old value in old_hod table
+	if TG_OP='DELETE' then
+		insert into old_hod (faculty_id, dept_name, start_date, end_date, leaved_on)
+			values (old.faculty_id, old.dept_name, old.start_date, old.end_date, now());
+	end if;
+	
+	return old;
+end
+$$;
+
+drop trigger if exists verify_hod
+on hod;
+
+create trigger verify_hod
+before insert or update or delete
+on hod for each row
+execute procedure verify_hod_fun();
+
+---------------------------------------------------------------------------
+--Trigger on deletion/update from Cross_cutting_faculty table
+---------------------------------------------------------------------------
+
+-- Table to store old_cross_cutting_faculty
+create table old_cross_cutting_faculty(
+	id SERIAL NOT NULL PRIMARY KEY,
+	faculty_id int not null,
+	cross_role varchar(30),
+	start_date DATE,
+	end_date DATE,
+	leaved_on TIMESTAMP(6),
+	FOREIGN KEY (cross_role) REFERENCES cross_faculty_role(cross_role)
+)
+
+-- will insert old value in old_cross_cutting_faculty whenever there is
+-- update or deletion on table cross_cuttong_faculty
+create or replace function verify_cross_cutting_faculty_fun()
+returns trigger
+language plpgsql
+as
+$$
+declare
+	cc_data record;
+	
+	update_cur cursor for
+		select *
+		from pending_leave_application p;
+	row record;
+	dummy record;
+begin
+	if TG_OP='UPDATE' or TG_OP='INSERT' then
+		select *
+		into cc_data
+		from faculty f
+		where new.faculty_id = f.faculty_id;
+		
+		if not found then
+			raise exception 'faculty does not exist';
+		end if;
+		
+		select * into dummy from hod h where h.faculty_id=new.faculty_id;
+		if found then
+			raise exception 'Faculty already hold HoD role. Cannot be appointed as cross cutting faculty';
+		end if;
+		
+		select * into dummy from director d where d.faculty_id=new.faculty_id;
+		if found then
+			raise exception 'Faculty already hold Director position. Cannot be appointed as cross cutting faculty';
+		end if;
+		
+		call auto_reject_when_faculty_change(new.faculty_id);
+		
+		if TG_OP='UPDATE' then
+			insert into old_cross_cutting_faculty(faculty_id, cross_role, start_date, end_date, leaved_on)
+				values (old.faculty_id, old.cross_role, old.start_date, old.end_date, now());
+				
+			open update_cur;
+				
+			loop
+				fetch update_cur into row;
+				exit when not found;
+				
+				if row.current_level='dean faculty affair' then
+					update pending_leave_application set current_level_faculty_id = new.faculty_id
+						where status='pending' and current_level = row.current_level;
+				end if;
+			end loop;
+			
+			close update_cur;
+			
+			call auto_reject_when_faculty_change(old.faculty_id);
+			
+		end if;
+		
+		raise info 'new % has been appointed', new.cross_role;
+		return new;
+	end if;
+	
+	if TG_OP='DELETE' then
+		insert into old_cross_cutting_faculty(faculty_id, cross_role, start_date, end_date, leaved_on)
+			values (old.faculty_id, old.cross_role, old.start_date, old.end_date, now());
+		
+		raise info 'faculty has been removed from % position', old.cross_role;
+		return old;
+	end if;
+	
+end
+$$
+
+drop trigger if exists verify_cross_cutting_faculty
+on cross_cutting_faculty;
+
+create trigger verify_cross_cutting_faculty
+before insert or update or delete
+on cross_cutting_faculty for each row
+execute procedure verify_cross_cutting_faculty_fun();
+
+
+---------------------------------------------------------------------------
+--Trigger on deletion/update from director table
+---------------------------------------------------------------------------
+
+-- Table to store previous director
+create table old_director(
+	id SERIAL NOT NULL PRIMARY KEY,
+	faculty_id int not null,
+	cross_role varchar(30) default 'director',
+	start_date DATE,
+	end_date DATE,
+	leaved_on TIMESTAMP(6)
+)
+
+-- will insert old value in old_director whenever there is
+-- update or deletion on table director
+create or replace function verify_director_fun()
+returns trigger
+language plpgsql
+as
+$$
+declare
+	cc_data record;
+	
+	update_cur cursor for
+		select *
+		from pending_leave_application p;
+	row record;
+begin
+	if TG_OP='UPDATE' or TG_OP='INSERT' then
+		select *
+		into cc_data
+		from faculty f
+		where new.faculty_id = f.faculty_id;
+		
+		if not found then
+			raise exception 'faculty does not exist';
+		end if;
+		
+		if TG_OP='UPDATE' then
+			insert into old_director(faculty_id, start_date, end_date, leaved_on)
+				values (old.faculty_id, old.start_date, old.end_date, now());
+				
+			open update_cur;
+				
+			loop
+				fetch update_cur into row;
+				exit when not found;
+				
+				if row.current_level='director' then
+					update pending_leave_application set current_level_faculty_id = new.faculty_id
+						where status='pending' and current_level=row.current_level;
+				end if;
+			end loop;
+			
+			close update_cur;
+		end if;
+		
+		raise info 'new director has been appointed';
+		return new;
+	end if;
+	
+	if TG_OP='DELETE' then
+		insert into old_director(faculty_id, start_date, end_date, leaved_on)
+			values (old.faculty_id, old.start_date, old.end_date, now());
+			
+		raise info 'faculty has been removed from director position';
+		return old;
+	end if;
+	
+end
+$$
+
+drop trigger if exists verify_cross_cutting_faculty
+on cross_cutting_faculty;
+
+create trigger verify_director
+before insert or update or delete
+on director for each row
+execute procedure verify_director_fun();
+
+---------------------------------------------------------------------------
+--Trigger on deletion from faculty table
+---------------------------------------------------------------------------
+
+-- Table to store retired/leaved faculty data
+create table old_faculty(
+	faculty_id int PRIMARY KEY,
+	name varchar(20) not null,
+	email varchar(20) not null,
+	mobile_no varchar(10) not null,
+	dept_name varchar(6) not null,
+	leaved_on TIMESTAMP(6),
+	FOREIGN KEY(dept_name) REFERENCES department(dept_name)
+);
+
+create or replace function delete_from_faculty_fun()
+returns trigger
+language plpgsql
+as
+$$
+declare
+	faculty_data record;
+begin
+	insert into old_faculty(faculty_id, name, email, mobile_no, dept_name, leaved_on)
+		values (old.faculty_id, old.name, old.email, old.mobile_no, old.dept_name, now());
+		
+	delete from login_data
+	where faculty_id=old.faculty_id;
+	
+	delete from remaining_leave
+	where faculty_id=old.faculty_id;
+	
+	select * into faculty_data
+	from director d
+	where d.faculty_id=old.faculty_id;
+	
+	if found then
+		delete from director d
+		where d.faculty_id=old.faculty_id;
+	end if;
+	
+	select * into faculty_data
+	from cross_cutting_faculty c
+	where c.faculty_id=old.faculty_id;
+	
+	if found then
+		delete from cross_cutting_faculty c
+		where c.faculty_id=old.faculty_id;
+	end if;
+	
+	select * into faculty_data
+	from hod h
+	where h.faculty_id=old.faculty_id;
+	
+	if found then
+		delete from hod h
+		where h.faculty_id=old.faculty_id;
+	end if;
+	
+	return old;
+end
+$$
+
+drop trigger if exists delete_from_faculty
+on faculty;
+
+create trigger delete_from_faculty
+before delete
+on faculty for each row
+execute procedure delete_from_faculty_fun();
+
+-----------------------------------------------------------
+-- TRIGGER on insertion into faculty table
+-----------------------------------------------------------
+
+create or replace function insert_into_remaining_leave_fun()
+returns trigger
+language plpgsql
+as
+$$
+declare
+	max_leave_data record;
+begin
+	select max_leave into max_leave_data from max_leave;
+	
+	insert into remaining_leave(faculty_id, remaining_leave)
+		values(new.faculty_id, max_leave_data.max_leave);
+	return new;
+	
+end
+$$
+
+drop trigger if exists insert_into_remaining_leave
+on faculty;
+
+create trigger insert_into_remaining_leave
+after insert
+on faculty for each row
+execute procedure insert_into_remaining_leave_fun();
+
+---------------------------------------------------------------------------
+--Procedure to update remaining_leave table (whever there is change in year)
+---------------------------------------------------------------------------
+drop procedure if exists check_for_year_change;
+
+create or replace procedure check_for_year_change()
+language plpgsql
+as
+$$
+declare
+	prev_date DATE;
+	date_now DATE;
+	prev_year int;
+	
+	year_now int;
+	faculty_data record;
+	max_leave_data int;
+	
+	leave_cur cursor for
+		select *
+		from remaining_leave;
+begin
+	date_now = CURRENT_DATE;
+	select current_year into prev_date from max_leave;
+	prev_year = EXTRACT(YEAR FROM DATE (prev_date));
+	year_now = EXTRACT(YEAR FROM DATE (date_now));
+	
+	raise info 'year_now : % , prev_year: %', year_now, prev_year;
+	
+	open leave_cur;
+	if year_now!=prev_year then
+		select max_leave into max_leave_data from max_leave;
+		loop
+			fetch leave_cur into faculty_data;
+		
+			exit when not found;
+			
+			update remaining_leave set remaining_leave = remaining_leave+max_leave_data
+				where remaining_leave.faculty_id=faculty_data.faculty_id;
+			
+		end loop;
+	end if;
+	
+	update max_leave set current_year = date_now;
+	
+	close leave_cur;
+end
+$$
+
+call check_for_year_change('2022-02-11');

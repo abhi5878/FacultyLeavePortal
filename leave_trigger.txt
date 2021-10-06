@@ -1,0 +1,404 @@
+---------------------------------------------------------------------------
+-- Trigger for insert in leave_application
+-- this will initiate leave application
+---------------------------------------------------------------------------
+
+------------------------------------------------
+--this procedure will give the role to which
+--application needs to be forwarded
+------------------------------------------------
+
+drop function if exists find_table_name;
+
+-- given input initiator and approved_by 
+-- this function will return table name in which we will have to forward application
+create or replace function find_table_name(
+							_initiator varchar,
+							_approved_by varchar,
+							type char(1))
+returns varchar
+language plpgsql
+as
+$$
+declare
+	forward_to varchar;
+begin
+	forward_to = null;
+	if type='n' then
+		select r.forward_to into forward_to from route r
+			where r.initiator=_initiator and r.approved_by=_approved_by;
+		
+		if not found then
+			return null;
+		end if;
+	else
+		select r.forward_to into forward_to from route_r r
+			where r.initiator=_initiator and r.approved_by=_approved_by;
+		
+		if not found then
+			return null;
+		end if;
+	end if;
+	
+	return forward_to;
+end
+$$
+
+--------------------------------------------
+-- Procedure to initiate leave application
+--------------------------------------------
+
+drop function if exists initiate_application_fun;
+
+create or replace function initiate_application_fun()
+returns trigger
+language plpgsql
+as
+$$
+declare
+	initiator_faculty varchar;
+	current_faculty varchar;
+	table_name varchar;
+	_dept_name varchar;
+	current_faculty_id int;
+	forward_to varchar;
+	
+	dummy record;
+begin
+	select * into dummy from faculty f where f.faculty_id=new.faculty_id;
+	
+	if not found then
+		raise exception 'faculty does not exist';
+	end if;
+	
+	-- insert into pending leave application
+	-- seacrh into director
+	-- director is not allowed to apply for leave
+	select * into dummy from director d where d.faculty_id=new.faculty_id;
+	
+	if found then
+		raise exception 'Director cannot apply for leave';
+	end if;
+	
+	-- search into cross_cutting_faculty
+	select * into dummy from cross_cutting_faculty c
+		where c.faculty_id = new.faculty_id;
+	
+	if found then
+		initiator_faculty = 'dean faculty affair';
+		current_faculty = initiator_faculty;
+	else 
+		-- search into hod
+		select * into dummy from hod h where h.faculty_id=new.faculty_id;
+		
+		if found then
+			initiator_faculty = 'hod';
+			current_faculty = 'hod';
+		else
+			initiator_faculty = 'faculty';
+			current_faculty = 'faculty';
+			
+			select f.dept_name into _dept_name from faculty f where f.faculty_id=new.faculty_id; 
+		end if;
+	end if;
+	
+	table_name = find_table_name(initiator_faculty, current_faculty, new.type);
+	
+	if table_name='director' then
+		select d.faculty_id into current_faculty_id from director d;
+	elseif table_name = 'dean faculty affair' then
+		select c.faculty_id into current_faculty_id from cross_cutting_faculty c
+			where c.role = 'Dean Faculty Affairs';
+	elseif table_name='hod' then
+		select h.faculty_id into current_faculty_id from hod h where h.dept_name=_dept_name;
+	else
+		table_name=NULL;
+	end if;
+	
+	if table_name is not null then
+		insert into pending_leave_application(faculty_id, application_id, prev_level, current_level,
+									current_level_faculty_id, date) values (new.faculty_id, new.application_id,
+																initiator_faculty, table_name, current_faculty_id, now());
+	end if;
+	
+	return new;
+	
+end;
+$$;
+
+drop trigger if exists initiate_application
+on leave_application;
+
+create trigger initiate_application
+after insert on leave_application
+for each row execute procedure initiate_application_fun();
+
+---------------------------------------------------------------------------
+-- Trigger on delete in pending_leave_application
+---------------------------------------------------------------------------
+
+create or replace function transfer_to_leave_application_hist_fun()
+returns trigger
+language plpgsql
+as
+$$
+declare
+	row record;
+	
+	pending_leave_cur cursor(facultyid int , applicationid int) for
+		select *
+		from pending_leave_application p
+		where p.faculty_id=facultyid and p.application_id=applicationid;
+begin
+	open pending_leave_cur(old.faculty_id, old.application_id);
+	
+	--loop
+	--fetch pending_leave_cur into row;
+	
+	--exit when not found;
+	
+	insert into leave_application_hist(faculty_id, application_id, prev_level, current_level,
+		current_level_faculty_id, status, date) values (old.faculty_id, old.application_id, old.prev_level,
+														old.current_level, old.current_level_faculty_id, old.status, old.date);
+	--end loop;
+	
+	close pending_leave_cur;
+	
+	return old;
+end
+$$;
+
+drop trigger if exists transfer_to_leave_application_hist
+on pending_leave_application;
+
+create trigger transfer_to_leave_application_hist
+before delete
+on pending_leave_application for each row
+execute procedure transfer_to_leave_application_hist_fun();
+
+---------------------------------------------------------------------------
+-- Trigger on update in pending_leave_application
+---------------------------------------------------------------------------
+
+create or replace function update_leave_application_fun()
+returns trigger
+language plpgsql
+as
+$$
+declare
+	type char;
+	forward_to varchar;
+	initiator_faculty varchar;
+	_dept_name varchar;
+	current_faculty_id int;
+	
+	dummy record;
+	leaveUsed int = 0;
+	remainingLeave int;
+begin
+	if new.status != old.status then
+		
+		if new.status = 'rejected' then
+			delete from pending_leave_application
+				where faculty_id = new.faculty_id and application_id = new.application_id;
+			
+			update leave_application set status = new.status
+				where faculty_id=new.faculty_id and application_id=new.application_id;
+				
+		elseif new.status = 'approved' then
+			-- first find whom to forward
+			-- type of application
+			select l.type into type from leave_application l where 
+				l.faculty_id = new.faculty_id and l.application_id= new.application_id;
+			
+			-- find the level of initiator
+			-- seacrh into cross_cutting_faculty
+			select * into dummy from cross_cutting_faculty c
+				where c.faculty_id = new.faculty_id;
+			
+			if found then
+				initiator_faculty = 'dean faculty affair';
+			else
+				-- search into hod
+				select * into dummy from hod h where h.faculty_id=new.faculty_id;
+				
+				if found then
+					initiator_faculty = 'hod';
+				else
+					initiator_faculty = 'faculty';
+					
+					select f.dept_name into _dept_name from faculty f where f.faculty_id=new.faculty_id; 
+				end if;
+			end if;
+			
+			forward_to = find_table_name(initiator_faculty,  new.current_level, type);
+			
+			if forward_to is null then
+				select * into dummy from leave_application l where l.faculty_id = new.faculty_id
+					and l.application_id=new.application_id;
+					
+				leaveUsed = (dummy.end_date - dummy.start_date) + 1;
+				
+				select r.remaining_leave into remainingLeave from remaining_leave r where r.faculty_id = new.faculty_id;
+				
+				update remaining_leave set remaining_leave = (remainingLeave - leaveUsed)
+					where faculty_id = new.faculty_id;
+				
+				update leave_application set status = new.status
+					where faculty_id=new.faculty_id and application_id=new.application_id;
+				
+				delete from pending_leave_application
+					where faculty_id = new.faculty_id and application_id = new.application_id;
+			else
+				if forward_to='director' then
+					select d.faculty_id into current_faculty_id from director d;
+				elseif forward_to = 'dean faculty affair' then
+					select c.faculty_id into current_faculty_id from cross_cutting_faculty c
+						where c.cross_role = 'Dean Faculty Affairs';
+				elseif forward_to='hod' then
+					select h.faculty_id into current_faculty_id from hod h where h.dept_name = _dept_name;
+				else
+					forward_to=null;
+				end if;
+				
+				if forward_to is not null then
+					insert into pending_leave_application(faculty_id, application_id, prev_level, current_level,
+												current_level_faculty_id, date) values (new.faculty_id, new.application_id,
+																			new.current_level, forward_to, current_faculty_id, now());
+				end if;
+				
+			end if;
+		end if;
+	end if;
+	
+	return new;
+end
+$$;
+
+drop trigger if exists update_leave_application
+on pending_leave_application;
+
+create trigger update_leave_application
+after update
+on pending_leave_application for each row
+execute procedure update_leave_application_fun();
+
+
+---------------------------------------------------------------------------
+-- procedure to update current_level_faculty_id in pending_leave_application
+-- in case of change of faculty
+---------------------------------------------------------------------------
+-- written in update part of hod, dean, director
+
+---------------------------------------------------------------------------
+-- procedure to auto reject application (based on date)
+---------------------------------------------------------------------------
+
+drop procedure if exists auto_reject_bydate;
+
+create or replace procedure auto_reject_bydate()
+language plpgsql
+as
+$$
+declare
+	row record;
+	
+	application_cur cursor for
+		select *
+		from leave_application l;
+begin
+	open application_cur;
+	
+	loop
+		fetch application_cur into row;
+		
+		exit when not found;
+		
+		if row.start_date = CURRENT_DATE and row.type = 'n' then
+			update pending_leave_application set (status, date) = ('rejected', now())
+				where status='pending' and faculty_id=row.faculty_id and application_id = row.application_id;
+				
+			update leave_application_hist set remark = 'rejected by system'
+				where status = 'rejected' and faculty_id=row.faculty_id and application_id = row.application_id;
+		end if;
+	end loop;
+	
+	close application_cur;
+end;
+$$
+
+
+---------------------------------------------------------------------------
+-- procedure to auto reject application when faculty (who initiated application)
+-- changed his role (e.g. from faculty to hod)
+---------------------------------------------------------------------------
+
+drop procedure if exists auto_reject_when_faculty_change;
+
+create or replace procedure auto_reject_when_faculty_change(facultyid int)
+language plpgsql
+as
+$$
+declare
+	row record;
+	applicationid int;
+	
+	application_cur cursor for
+		select *
+		from leave_application l;
+begin
+	-- find application id
+	select distinct(p.application_id) into applicationid from pending_leave_application p
+		where p.faculty_id=facultyid;
+	
+	if found then 	
+		update pending_leave_application set (status, date) = ('rejected', now())
+			where status='pending' and faculty_id=facultyid and application_id = applicationid;
+			
+		update leave_application_hist set remark = 'rejected by system'
+			where status = 'rejected' and faculty_id=facultyid and application_id = applicationid;
+	end if;
+	
+	
+end;
+$$
+
+---------------------------------------------------------------------------
+-- procedure to check whether a faculty has leave_application is in process or not
+---------------------------------------------------------------------------
+
+drop function if exists check_for_ongoing_leave_application;
+
+create or replace function check_for_ongoing_leave_application(facultyid int)
+returns int 
+language plpgsql
+as
+$$
+declare
+	today_date DATE;
+	
+	dummy record;
+begin
+	today_date = CURRENT_DATE;
+	
+	select * into dummy from remaining_leave r where r.faculty_id = facultyid;
+	
+	if dummy.remaining_leave <= 0 then
+		return 1;
+	end if;
+	
+	select * into dummy from leave_application l where l.faculty_id=facultyid and (l.status='pending');
+	
+	if found then
+		return 1;
+	end if;
+	
+	select * into dummy from leave_application l where l.faculty_id=facultyid and (l.status='approved') and l.end_date>=today_date;
+	
+	if found then
+		return 1;
+	else
+		return 0;
+	end if;
+end
+$$
